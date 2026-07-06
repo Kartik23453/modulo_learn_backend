@@ -148,6 +148,38 @@ router.get("/help", (req: Request, res: Response) => {
     </div>
 
     <div class="endpoint">
+      <span class="method post">POST</span>
+      <span class="url">
+        <span class="url-segment">/</span><span class="url-param">ask</span>
+      </span>
+      <div class="description">Get timestamps from a YouTube video or playlist. If the creator added chapters, those are returned directly. Otherwise, Gemini Flash generates them.</div>
+      <div class="body-section">
+        <div class="body-title">Request Body</div>
+        <div class="body-grid">
+          <div class="field"><span class="field-name">url</span> <span class="field-type">string</span> <span class="field-required">*</span></div>
+        </div>
+      </div>
+      <div class="example-box">
+        <div class="example-label">Example — Video</div>
+        <div class="example-code">
+          <span class="comment"># Get timestamps for a single video</span><br>
+          curl -X POST http://localhost:5001/modulo-learn-75e14/us-central1/api/ask \<br>
+          &nbsp;&nbsp;-H <span class="string">"Content-Type: application/json"</span> \<br>
+          &nbsp;&nbsp;-d <span class="string">'{ <span class="key">"url"</span>: "https://youtube.com/watch?v=dQw4w9WgXcQ" }'</span>
+        </div>
+      </div>
+      <div class="example-box">
+        <div class="example-label">Example — Playlist</div>
+        <div class="example-code">
+          <span class="comment"># Get timestamps for all videos in a playlist</span><br>
+          curl -X POST http://localhost:5001/modulo-learn-75e14/us-central1/api/ask \<br>
+          &nbsp;&nbsp;-H <span class="string">"Content-Type: application/json"</span> \<br>
+          &nbsp;&nbsp;-d <span class="string">'{ <span class="key">"url"</span>: "https://youtube.com/playlist?list=PL..." }'</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="endpoint">
       <span class="method get">GET</span>
       <span class="url">
         <span class="url-segment">/</span><span class="url-segment">help</span>
