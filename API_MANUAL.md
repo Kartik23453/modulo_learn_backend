@@ -1,5 +1,10 @@
 # Modulo Learn — API Manual
 
+> **For AI Assistants:** This document is structured for machine-readable consumption. Every endpoint
+> includes TypeScript types, curl examples, exact JSON shapes, and a "Gotchas" section for the most
+> common integration mistakes. Read the [Complete TypeScript SDK](#9-complete-typescript-sdk) section
+> first if you are generating client code.
+
 **Base URL (emulator):** `http://127.0.0.1:5001/modulo-learn-75e14/us-central1/api`
 **Base URL (production):** `https://us-central1-modulo-learn-75e14.cloudfunctions.net/api`
 
@@ -15,76 +20,150 @@
 6. [Error Handling](#6-error-handling)
 7. [Complete User Journey](#7-complete-user-journey)
 8. [Neo4j Graph Schema](#8-neo4j-graph-schema)
+9. [Complete TypeScript SDK](#9-complete-typescript-sdk)
+10. [Common Mistakes & Gotchas](#10-common-mistakes--gotchas)
+
+---
+
+## TypeScript Types Reference
+
+> **AI note:** Import or copy these types. All request/response shapes below derive from these.
+
+```typescript
+// ── Auth ──────────────────────────────────────────────────────────────────
+interface SignupRequest  { name: string; email: string; password: string; }
+interface SignupResponse { message: string; user: { name: string; email: string; uid: string; }; }
+
+interface LoginRequest  { email: string; password: string; }
+interface LoginResponse { message: string; uid: string; email: string; name: string; token: string; }
+
+interface MeResponse    { uid: string; email: string; name: string; }
+
+// ── Ask ───────────────────────────────────────────────────────────────────
+interface AskRequest  { url: string; }
+interface Timestamp   { start_seconds: number; title: string; }
+
+interface VideoAskResponse {
+  type: "video";
+  title: string;
+  url: string;
+  thumbnail: string;
+  timestamps: Timestamp[];
+}
+
+interface PlaylistVideo { title: string; url: string; thumbnail: string; timestamps: Timestamp[]; }
+interface PlaylistAskResponse {
+  type: "playlist";
+  title: string;
+  url: string;
+  videos: PlaylistVideo[];
+}
+type AskResponse = VideoAskResponse | PlaylistAskResponse;
+
+// ── Courses ───────────────────────────────────────────────────────────────
+interface LectureInput        { title: string; duration?: number; }
+interface CreateCourseRequest { title: string; metadata?: string; lectures: LectureInput[]; }
+interface CreateCourseResponse{ message: string; courseId: string; title: string; lectures: number; }
+
+interface EnrollRequest   { deadline: string; }       // ISO date e.g. "2026-09-01"
+interface EnrollResponse  { message: string; courseId: string; deadline: string; }
+
+interface CompleteLectureResponse { message: string; }
+
+interface CourseProgress {
+  courseTitle: string;
+  totalLectures: number;
+  completedLectures: number;
+  percentage: number;         // Math.round(completedLectures / totalLectures * 100)
+  deadline: string | null;
+}
+
+type ListCoursesResponse = Array<{
+  courseId: string;
+  courseTitle: string;
+  totalLectures: number;
+  completedLectures: number;
+  percentage: number;
+  deadline: string | null;
+}>;
+
+// ── Errors ────────────────────────────────────────────────────────────────
+interface ApiError { error: string; }
+```
 
 ---
 
 ## 1. Authentication
 
-All auth endpoints are **unauthenticated** (public). Course endpoints require a `Bearer` token obtained from login.
+All `/auth/*` endpoints are **public** (no `Authorization` header needed).
+Course endpoints require a `Bearer` token from `POST /auth/login`.
 
 ### 1.1 Signup
 
-Creates a Firebase Auth user and stores `{ name, email }` in Firestore.
+Creates a Firebase Auth user and writes `{ name, email, createdAt }` to Firestore.
 
 **Endpoint:** `POST /auth/signup`
+**Auth required:** ❌ No
 
-**Request Body:**
+**Request Body:** `SignupRequest`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | `string` | Yes | User's display name |
-| `email` | `string` | Yes | User's email address |
-| `password` | `string` | Yes | Plain text password |
+| `name` | `string` | ✅ | User's display name |
+| `email` | `string` | ✅ | User's email address |
+| `password` | `string` | ✅ | Plain-text password |
 
 **Example Request:**
 ```json
-{
-  "name": "John Doe",
-  "email": "john@example.com",
-  "password": "securePassword123"
-}
+{ "name": "John Doe", "email": "john@example.com", "password": "securePassword123" }
 ```
 
-**Success Response — `201 Created`:**
+**curl:**
+```bash
+curl -X POST "$BASE_URL/auth/signup" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"John Doe","email":"john@example.com","password":"securePassword123"}'
+```
+
+**Success Response — `201 Created`:** `SignupResponse`
 ```json
 {
   "message": "User created",
-  "user": {
-    "name": "John Doe",
-    "email": "john@example.com",
-    "uid": "abc123def456"
-  }
+  "user": { "name": "John Doe", "email": "john@example.com", "uid": "abc123def456" }
 }
 ```
 
 **Error Responses:**
-- `400` — Missing fields: `{ "error": "name, email, and password are required" }`
-- `400` — Duplicate email: `{ "error": "Email already registered" }`
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{ "error": "name, email, and password are required" }` | Any field missing |
+| `400` | `{ "error": "Email already registered" }` | Duplicate email |
 
 ---
 
 ### 1.2 Login
 
-Authenticates with email/password and returns a Firebase ID token.
+Authenticates with email/password via Firebase Identity Toolkit. Returns a Firebase ID Token (JWT).
 
 **Endpoint:** `POST /auth/login`
+**Auth required:** ❌ No
 
-**Request Body:**
+**Request Body:** `LoginRequest`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `email` | `string` | Yes | User's email |
-| `password` | `string` | Yes | User's password |
+| `email` | `string` | ✅ | User's email |
+| `password` | `string` | ✅ | User's password |
 
-**Example Request:**
-```json
-{
-  "email": "john@example.com",
-  "password": "securePassword123"
-}
+**curl:**
+```bash
+curl -X POST "$BASE_URL/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"john@example.com","password":"securePassword123"}'
 ```
 
-**Success Response — `200 OK`:**
+**Success Response — `200 OK`:** `LoginResponse`
 ```json
 {
   "message": "Logged in",
@@ -95,83 +174,109 @@ Authenticates with email/password and returns a Firebase ID token.
 }
 ```
 
-**Important fields for frontend:**
-- `uid` — Unique user ID, stored for future user identification
-- `token` — Firebase ID Token (JWT). Must be saved and sent as `Authorization: Bearer <token>` on all course endpoints. Expires after 1 hour.
-- `name` — User's display name
+**Critical fields for frontend:**
+- `token` — Firebase ID Token (JWT). **Expires after 1 hour.** Send as `Authorization: Bearer <token>` on all course endpoints.
+- `uid` — Firebase UID. Store for display/reference.
+- `name` — Fetched from Firestore `users/{uid}.name`, **not** from Firebase Auth `displayName`.
 
 **Error Responses:**
-- `400` — Missing fields: `{ "error": "email and password are required" }`
-- `401` — Wrong credentials: `{ "error": "Invalid email or password" }`
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{ "error": "email and password are required" }` | Missing field |
+| `401` | `{ "error": "Invalid email or password" }` | Wrong credentials |
+| `500` | `{ "error": "<message>" }` | Unexpected server error |
 
 ---
 
 ### 1.3 Get Current User
 
-Returns the authenticated user's profile. Use this on page load to verify the token is still valid and get user data.
+Verifies the token and returns the user's profile from Firestore. Use this on every app load.
 
 **Endpoint:** `GET /auth/me`
+**Auth required:** ✅ Yes — `Authorization: Bearer <token>`
 
 **Headers:**
 
 | Header | Value | Required |
 |--------|-------|----------|
-| `Authorization` | `Bearer <token>` | Yes |
+| `Authorization` | `Bearer <token>` | ✅ |
 
-**Success Response — `200 OK`:**
-```json
-{
-  "uid": "abc123def456",
-  "email": "john@example.com",
-  "name": "John Doe"
-}
+**curl:**
+```bash
+curl "$BASE_URL/auth/me" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
-**Error Responses:**
-- `401` — Missing/invalid token: `{ "error": "Missing or invalid Authorization header" }`
-- `401` — Expired token: `{ "error": "Invalid or expired token" }`
+**Success Response — `200 OK`:** `MeResponse`
+```json
+{ "uid": "abc123def456", "email": "john@example.com", "name": "John Doe" }
+```
 
-**Frontend notes:**
-- Call this on app initialization to check if the stored token is still valid
-- If it returns `401`, redirect to login page
-- No refresh token endpoint exists yet — user must re-login when token expires
+> **AI note:** `name` comes from Firestore `users/{uid}.name`, not Firebase Auth `displayName`. If a
+> user was created outside of `POST /auth/signup`, their Firestore doc may not exist and `name` will
+> be `""`.
+
+**Error Responses:**
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401` | `{ "error": "Missing or invalid Authorization header" }` | No/malformed header |
+| `401` | `{ "error": "Invalid or expired token" }` | Expired or bad JWT |
+
+**Frontend pattern:**
+- Call on app init. If `401` → clear stored token → redirect to `/login`.
+- ⚠️ **No refresh token endpoint exists.** User must re-login after 1 hour.
 
 ---
 
 ## 2. Test Endpoint
 
-Simple health check to confirm the API is running.
+Simple health check. Returns **plain text**, not JSON.
 
 **Endpoint:** `GET /test`
+**Auth required:** ❌ No
+
+**curl:**
+```bash
+curl "$BASE_URL/test"
+```
 
 **Response — `200 OK`:**
 ```
 Up and Running
 ```
-(Plain text, not JSON)
+
+> **AI note:** Response `Content-Type` is `text/plain`. Do **not** call `.json()` on this response.
 
 ---
 
 ## 3. Ask — YouTube Timestamp Extraction
 
-Accepts a YouTube URL (video or playlist) and returns structured timestamps. Uses `yt-dlp` to extract existing chapters, or Gemini Flash to generate them if none exist.
+Accepts a YouTube URL (video or playlist) and returns structured timestamps.
+
+**How it works:**
+1. Uses `yt-dlp` to extract existing chapters from the video.
+2. If no chapters exist, downloads the transcript and sends it to **Gemini Flash** to generate timestamps.
+3. If no transcript either, Gemini uses the video title + description alone.
 
 **Endpoint:** `POST /ask`
+**Auth required:** ❌ No — this endpoint is **public**. No `Authorization` header needed.
 
-**Request Body:**
+**Request Body:** `AskRequest`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `url` | `string` | Yes | Full YouTube video or playlist URL |
+| `url` | `string` | ✅ | Full YouTube video or playlist URL |
 
-**Example Request:**
-```json
-{
-  "url": "https://youtube.com/watch?v=dQw4w9WgXcQ"
-}
+**curl:**
+```bash
+curl -X POST "$BASE_URL/ask" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://youtube.com/watch?v=dQw4w9WgXcQ"}'
 ```
 
-### 3.1 Video Response — `200 OK`
+### 3.1 Video Response — `200 OK` → `VideoAskResponse`
 
 ```json
 {
@@ -180,14 +285,17 @@ Accepts a YouTube URL (video or playlist) and returns structured timestamps. Use
   "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   "thumbnail": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
   "timestamps": [
-    { "start_seconds": 0, "title": "Intro" },
+    { "start_seconds": 0,  "title": "Intro"   },
     { "start_seconds": 30, "title": "Verse 1" },
-    { "start_seconds": 90, "title": "Chorus" }
+    { "start_seconds": 90, "title": "Chorus"  }
   ]
 }
 ```
 
-### 3.2 Playlist Response — `200 OK`
+> **AI note:** The `source` field (e.g., `"chapters"`, `"gemini"`, `"gemini+transcript"`) is **stripped**
+> from the response — it is internal tracking only. Do not expect it in the response.
+
+### 3.2 Playlist Response — `200 OK` → `PlaylistAskResponse`
 
 ```json
 {
@@ -200,17 +308,8 @@ Accepts a YouTube URL (video or playlist) and returns structured timestamps. Use
       "url": "https://www.youtube.com/watch?v=...",
       "thumbnail": "https://i.ytimg.com/vi/.../hqdefault.jpg",
       "timestamps": [
-        { "start_seconds": 0, "title": "Topic 1" },
+        { "start_seconds": 0,  "title": "Topic 1" },
         { "start_seconds": 45, "title": "Topic 2" }
-      ]
-    },
-    {
-      "title": "Video 2 Title",
-      "url": "https://www.youtube.com/watch?v=...",
-      "thumbnail": "https://i.ytimg.com/vi/.../hqdefault.jpg",
-      "timestamps": [
-        { "start_seconds": 0, "title": "Start" },
-        { "start_seconds": 60, "title": "Main Content" }
       ]
     }
   ]
@@ -218,65 +317,83 @@ Accepts a YouTube URL (video or playlist) and returns structured timestamps. Use
 ```
 
 **Error Responses:**
-- `400` — Missing URL: `{ "error": "url is required" }`
-- `500` — yt-dlp/Gemini error: `{ "error": "describe error" }`
 
-**Frontend notes:**
-- The `timestamps` array feeds directly into `POST /courses` as the `lectures[]` array
-- `start_seconds` can be used to seek the YouTube player to that position
-- The `source` field is intentionally omitted from the response (internal tracking only)
-- For playlists, process each video's timestamps the same way as a single video
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{ "error": "url is required" }` | Missing `url` field |
+| `500` | `{ "error": "<message>" }` | yt-dlp failure, Gemini error, etc. |
+
+**Frontend integration notes:**
+- Feed `timestamps` directly into `POST /courses` as `lectures[]` (see exact mapping in §7).
+- `start_seconds` → seek the YouTube player: `player.seekTo(start_seconds, true)`.
+- For playlists, iterate `videos[]` and handle each the same as a single video response.
+- This endpoint can be **slow** (10–30 s) for large videos without existing chapters — show a loading state.
 
 ---
 
 ## 4. Courses — Neo4j Graph Database
 
 All course endpoints require **authentication** via `Authorization: Bearer <token>`.
+The token must be a valid Firebase ID Token from `POST /auth/login`.
 
-The token must be a valid Firebase ID Token obtained from `POST /auth/login` or `GET /auth/me`.
+---
 
 ### 4.1 Create Course
 
-Stores a course and its lectures in Neo4j. Lectures become nodes connected to the course via `[:CONTAINS]` relationships.
+Stores a course and its lectures in Neo4j.
+
+- Course node: `Course { id, title, metadata }`
+- Lecture nodes: `Lecture { id, title, duration }`
+- Relationship: `(Course)-[:CONTAINS]->(Lecture)`
+- Uses `MERGE` — safe to call again with the same courseId without duplication.
 
 **Endpoint:** `POST /courses`
+**Auth required:** ✅ Yes
 
 **Headers:**
 
 | Header | Value | Required |
 |--------|-------|----------|
-| `Authorization` | `Bearer <token>` | Yes |
-| `Content-Type` | `application/json` | Yes |
+| `Authorization` | `Bearer <token>` | ✅ |
+| `Content-Type` | `application/json` | ✅ |
 
-**Request Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `title` | `string` | Yes | Course name (usually the video title) |
-| `metadata` | `string` | No | YouTube URL or any extra info |
-| `lectures` | `array` | Yes | Array of lecture objects (from `/ask` timestamps) |
-
-Each lecture object:
+**Request Body:** `CreateCourseRequest`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `title` | `string` | Yes | Lecture/chapter name |
-| `duration` | `number` | No | Duration in seconds (defaults to 0) |
+| `title` | `string` | ✅ | Course name (typically the video title) |
+| `metadata` | `string` | ❌ | YouTube URL or any extra info |
+| `lectures` | `LectureInput[]` | ✅ | Array of lecture objects |
 
-**Example Request (from `/ask` result):**
+Each `LectureInput`:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | `string` | ✅ | Lecture/chapter name |
+| `duration` | `number` | ❌ | Start position in seconds (defaults to `0`) |
+
+**Example Request (built from `/ask` result):**
 ```json
 {
   "title": "Rick Astley - Never Gonna Give You Up",
   "metadata": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
   "lectures": [
-    { "title": "Intro", "duration": 0 },
+    { "title": "Intro",   "duration": 0  },
     { "title": "Verse 1", "duration": 30 },
-    { "title": "Chorus", "duration": 90 }
+    { "title": "Chorus",  "duration": 90 }
   ]
 }
 ```
 
-**Success Response — `201 Created`:**
+**curl:**
+```bash
+curl -X POST "$BASE_URL/courses" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Rick Astley","metadata":"https://...","lectures":[{"title":"Intro","duration":0}]}'
+```
+
+**Success Response — `201 Created`:** `CreateCourseResponse`
 ```json
 {
   "message": "Course created",
@@ -286,123 +403,139 @@ Each lecture object:
 }
 ```
 
-**Important:** Save the `courseId` — you need it for enroll, progress, and marking lectures complete.
+> ⚠️ **Save the `courseId`** — you need it for every subsequent operation (enroll, progress, mark
+> complete). There is **no** "get course by title" endpoint.
 
 **Error Responses:**
-- `400` — Missing title or lectures: `{ "error": "title and lectures[] are required" }`
-- `401` — Auth failure: `{ "error": "Missing or invalid Authorization header" }` or `{ "error": "Invalid or expired token" }`
-- `500` — Neo4j error: `{ "error": "error message" }`
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{ "error": "title and lectures[] are required" }` | Missing/empty fields |
+| `401` | `{ "error": "Missing or invalid Authorization header" }` | No/malformed header |
+| `401` | `{ "error": "Invalid or expired token" }` | Expired JWT |
+| `500` | `{ "error": "<neo4j message>" }` | Database error |
 
 ---
 
 ### 4.2 Enroll User in Course
 
-Creates an `[:ENROLLED_IN]` relationship between the authenticated user and the course, with a deadline stored as a relationship property.
+Creates an `[:ENROLLED_IN]` relationship between the authenticated user and the course, storing
+the deadline as a **relationship property**.
 
 **Endpoint:** `POST /courses/:courseId/enroll`
-
-**Headers:**
-
-| Header | Value | Required |
-|--------|-------|----------|
-| `Authorization` | `Bearer <token>` | Yes |
-| `Content-Type` | `application/json` | Yes |
+**Auth required:** ✅ Yes
 
 **URL Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `courseId` | `string` | The course ID returned from `POST /courses` |
+| `courseId` | `string` | The `courseId` from `POST /courses` |
 
-**Request Body:**
+**Request Body:** `EnrollRequest`
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `deadline` | `string` | Yes | ISO date string e.g. `"2026-09-01"` or `"2026-09-01T23:59:59Z"` |
+| `deadline` | `string` | ✅ | ISO date string e.g. `"2026-09-01"` |
 
-**Example Request:**
-```json
-{
-  "deadline": "2026-09-01"
-}
+**curl:**
+```bash
+curl -X POST "$BASE_URL/courses/course_1720286400000/enroll" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"deadline":"2026-09-01"}'
 ```
 
-**Success Response — `200 OK`:**
+**Success Response — `200 OK`:** `EnrollResponse`
 ```json
-{
-  "message": "Enrolled successfully",
-  "courseId": "course_1720286400000",
-  "deadline": "2026-09-01"
-}
+{ "message": "Enrolled successfully", "courseId": "course_1720286400000", "deadline": "2026-09-01" }
 ```
 
 **Error Responses:**
-- `400` — Missing deadline: `{ "error": "deadline (ISO date) is required" }`
-- `401` — Auth failure
-- `500` — Neo4j error
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `400` | `{ "error": "deadline (ISO date) is required" }` | Missing deadline |
+| `401` | Auth error (see §1) | — |
+| `500` | `{ "error": "<neo4j message>" }` | Database error |
 
 ---
 
 ### 4.3 Mark Lecture Complete
 
-Creates a `[:COMPLETED]` relationship from the user to the lecture. Idempotent — calling multiple times has no extra effect.
+Creates a `[:COMPLETED]` relationship from the user to the lecture.
+**Idempotent** — calling multiple times has no extra effect (safe to call on re-watch).
 
 **Endpoint:** `POST /courses/:courseId/lectures/:lectureId/complete`
-
-**Headers:**
-
-| Header | Value | Required |
-|--------|-------|----------|
-| `Authorization` | `Bearer <token>` | Yes |
+**Auth required:** ✅ Yes
+**Body:** None required.
 
 **URL Parameters:**
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `courseId` | `string` | The course ID |
-| `lectureId` | `string` | The lecture ID (returned in course creation or predictable format: `lecture_{courseId}_{index}`) |
+| `lectureId` | `string` | The lecture ID (see construction formula below) |
 
-**Lecture ID format:** `lecture_{courseId}_{index}` — e.g., if courseId is `course_1720286400000` and the lecture is the 3rd one (index 2), the lectureId is `lecture_course_1720286400000_2`.
+### ⚠️ Lecture ID Formula — Most Common Integration Point
 
-**No request body required.**
+Lecture IDs are **generated server-side** during `POST /courses` but **not returned** in any response.
+You must construct them client-side using this deterministic formula:
 
-**Success Response — `200 OK`:**
-```json
-{
-  "message": "Lecture marked as completed"
+```
+lectureId = "lecture_" + courseId + "_" + index
+```
+
+Where `index` is the **0-based** position of the lecture in the `lectures[]` array sent to `POST /courses`.
+
+**Examples for `courseId = "course_1720286400000"`:**
+
+| Lecture | Index | lectureId |
+|---------|-------|-----------|
+| Intro   | 0 | `lecture_course_1720286400000_0` |
+| Verse 1 | 1 | `lecture_course_1720286400000_1` |
+| Chorus  | 2 | `lecture_course_1720286400000_2` |
+
+**TypeScript helper:**
+```typescript
+function getLectureId(courseId: string, index: number): string {
+  return `lecture_${courseId}_${index}`;
 }
 ```
 
-**Error Responses:**
-- `401` — Auth failure
-- `500` — Neo4j error
+**curl:**
+```bash
+curl -X POST "$BASE_URL/courses/course_1720286400000/lectures/lecture_course_1720286400000_0/complete" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-**Frontend notes:**
-- Call this when the user finishes watching a lecture/chapter
-- The lecture IDs are not returned in the `/ask` or `/courses` responses. You must construct them using the format: `lecture_{courseId}_{index}`
-- Example: courseId = `course_1720286400000`, index 0 → `lecture_course_1720286400000_0`
+**Success Response — `200 OK`:**
+```json
+{ "message": "Lecture marked as completed" }
+```
+
+**Error Responses:**
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401` | Auth error | — |
+| `500` | `{ "error": "<neo4j message>" }` | Database error |
 
 ---
 
 ### 4.4 Get Course Progress
 
-Calculates completion percentage by counting `[:COMPLETED]` relationships relative to `[:CONTAINS]` relationships using Cypher queries — no JSON blobs.
+Returns completion stats for one course. Computed from graph relationship counts — no JSON blobs.
 
 **Endpoint:** `GET /courses/:courseId/progress`
+**Auth required:** ✅ Yes
 
-**Headers:**
+**curl:**
+```bash
+curl "$BASE_URL/courses/course_1720286400000/progress" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
-| Header | Value | Required |
-|--------|-------|----------|
-| `Authorization` | `Bearer <token>` | Yes |
-
-**URL Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `courseId` | `string` | The course ID |
-
-**Success Response — `200 OK`:**
+**Success Response — `200 OK`:** `CourseProgress`
 ```json
 {
   "courseTitle": "Rick Astley - Never Gonna Give You Up",
@@ -418,30 +551,34 @@ Calculates completion percentage by counting `[:COMPLETED]` relationships relati
 | Field | Type | Description |
 |-------|------|-------------|
 | `courseTitle` | `string` | Name of the course |
-| `totalLectures` | `number` | Total number of lectures in the course |
-| `completedLectures` | `number` | Number of lectures the user has completed |
-| `percentage` | `number` | `Math.round((completedLectures / totalLectures) * 100)` |
-| `deadline` | `string \| null` | The deadline set on enrollment, or null |
+| `totalLectures` | `number` | Total lectures in course |
+| `completedLectures` | `number` | Lectures this user has completed |
+| `percentage` | `number` | `Math.round(completedLectures / totalLectures * 100)` |
+| `deadline` | `string \| null` | Enrollment deadline, or `null` if not set |
 
 **Error Responses:**
-- `401` — Auth failure
-- `500` — Not enrolled: `{ "error": "User is not enrolled in this course" }`
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401` | Auth error | — |
+| `500` | `{ "error": "User is not enrolled in this course" }` | No `ENROLLED_IN` edge |
+| `500` | `{ "error": "<neo4j message>" }` | Other database error |
 
 ---
 
 ### 4.5 List Enrolled Courses
 
-Returns all courses the authenticated user is enrolled in, with progress for each.
+Returns all courses the authenticated user is enrolled in, with per-course progress.
 
 **Endpoint:** `GET /courses`
+**Auth required:** ✅ Yes
 
-**Headers:**
+**curl:**
+```bash
+curl "$BASE_URL/courses" -H "Authorization: Bearer $TOKEN"
+```
 
-| Header | Value | Required |
-|--------|-------|----------|
-| `Authorization` | `Bearer <token>` | Yes |
-
-**Success Response — `200 OK`:**
+**Success Response — `200 OK`:** `ListCoursesResponse`
 ```json
 [
   {
@@ -463,9 +600,14 @@ Returns all courses the authenticated user is enrolled in, with progress for eac
 ]
 ```
 
+> Returns `[]` (empty array) if the user has no enrolled courses — **not a 404**.
+
 **Error Responses:**
-- `401` — Auth failure
-- `500` — Server error
+
+| Status | Body | Cause |
+|--------|------|-------|
+| `401` | Auth error | — |
+| `500` | `{ "error": "<message>" }` | Server error |
 
 ---
 
@@ -474,56 +616,62 @@ Returns all courses the authenticated user is enrolled in, with progress for eac
 Returns an HTML page with all endpoints documented and curl examples.
 
 **Endpoint:** `GET /help`
+**Auth required:** ❌ No
 
-**Response:** `HTML` — rendered styled documentation page. Open in a browser, not as API data.
+**Response:** `text/html` — rendered styled documentation page.
+Open in a browser; do not parse as API data.
 
 ---
 
 ## 6. Error Handling
 
-All errors follow a consistent format:
+All API errors use a single consistent shape:
 
 ```json
-{
-  "error": "Human-readable error message"
-}
+{ "error": "Human-readable error message" }
 ```
 
-### HTTP Status Codes Used
+### HTTP Status Codes
 
 | Code | Meaning | When |
 |------|---------|------|
 | `200` | OK | Successful GET or POST |
-| `201` | Created | Resource successfully created (signup, course) |
-| `400` | Bad Request | Missing or invalid fields in request body |
-| `401` | Unauthorized | Missing, invalid, or expired auth token |
-| `500` | Internal Server Error | Server-side failure (Neo4j, Gemini, yt-dlp, etc.) |
+| `201` | Created | Signup, course creation |
+| `400` | Bad Request | Missing/invalid request fields |
+| `401` | Unauthorized | Missing, invalid, or expired token |
+| `500` | Internal Server Error | Neo4j, Gemini, yt-dlp, unexpected failures |
 
-### Frontend Error Handling Pattern
+### Recommended Fetch Wrapper
 
 ```typescript
-// Recommended fetch wrapper pattern
-async function apiRequest(endpoint: string, options?: RequestInit) {
+const BASE_URL = "https://us-central1-modulo-learn-75e14.cloudfunctions.net/api";
+
+async function apiRequest<T>(
+  endpoint: string,
+  options: RequestInit = {},
+  token?: string
+): Promise<T> {
   const response = await fetch(`${BASE_URL}${endpoint}`, {
     ...options,
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options?.headers,
+      ...options.headers,
     },
   });
 
+  // Handle plain-text responses (e.g. GET /test)
+  const contentType = response.headers.get("content-type") ?? "";
+  const body = contentType.includes("application/json")
+    ? await response.json()
+    : await response.text();
+
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Request failed");
+    const message = typeof body === "object" ? (body as ApiError).error : body;
+    throw new Error(message || `Request failed: ${response.status}`);
   }
 
-  // Handle non-JSON responses (like /test)
-  const contentType = response.headers.get("content-type");
-  if (contentType?.includes("application/json")) {
-    return response.json();
-  }
-  return response.text();
+  return body as T;
 }
 ```
 
@@ -531,99 +679,139 @@ async function apiRequest(endpoint: string, options?: RequestInit) {
 
 ## 7. Complete User Journey
 
-Here is the full flow a frontend should implement:
+Here is the exact frontend flow with code snippets:
 
 ### Step 1: Signup or Login
 
-```
-POST /auth/signup  →  { user: { uid, name, email } }
-// or
-POST /auth/login   →  { uid, name, email, token }
-```
+```typescript
+// Signup (new user)
+const signup = await apiRequest<SignupResponse>("/auth/signup", {
+  method: "POST",
+  body: JSON.stringify({ name, email, password }),
+});
 
-**Store in frontend:** `uid`, `token`, `name`, `email` (localStorage/sessionStorage)
+// OR Login (existing user)
+const login = await apiRequest<LoginResponse>("/auth/login", {
+  method: "POST",
+  body: JSON.stringify({ email, password }),
+});
+
+// Store these in localStorage or state
+const token = login.token;   // JWT, expires in 1 hour
+const uid   = login.uid;
+const name  = login.name;
+```
 
 ### Step 2: Verify Session on App Load
 
-```
-GET /auth/me  (Authorization: Bearer <token>)
-→  { uid, email, name }  or  401 (redirect to login)
+```typescript
+try {
+  const me = await apiRequest<MeResponse>("/auth/me", {}, token);
+  // Token still valid — continue to dashboard
+} catch {
+  // Token expired or invalid → clear storage and redirect
+  localStorage.removeItem("token");
+  window.location.href = "/login";
+}
 ```
 
 ### Step 3: Get YouTube Timestamps
 
-```
-POST /ask  { url: "https://youtube.com/watch?v=..." }
-→  { type: "video", title, thumbnail, timestamps: [...] }
-```
+```typescript
+// No token needed — /ask is public
+const ask = await apiRequest<AskResponse>("/ask", {
+  method: "POST",
+  body: JSON.stringify({ url: youtubeUrl }),
+});
 
-### Step 4: Create Course in Neo4j
-
-```
-POST /courses  (Authorization: Bearer <token>)
-{
-  title: result.title,
-  metadata: result.url,
-  lectures: result.timestamps.map(t => ({
-    title: t.title,
-    duration: t.start_seconds  // or 0 if start_seconds is the next timestamp
-  }))
+if (ask.type === "video") {
+  // use ask.timestamps
+} else {
+  // ask.type === "playlist" — iterate ask.videos
 }
-→  { courseId: "course_...", lectures: 5 }
 ```
 
-**Store in frontend:** `courseId`
+### Step 4: Create Course
+
+```typescript
+// Map timestamps to lectures
+// Use start_seconds as the duration (chapter start position in seconds)
+const lectures = ask.timestamps.map((t: Timestamp) => ({
+  title: t.title,
+  duration: t.start_seconds,
+}));
+
+const course = await apiRequest<CreateCourseResponse>(
+  "/courses",
+  { method: "POST", body: JSON.stringify({ title: ask.title, metadata: ask.url, lectures }) },
+  token
+);
+
+const courseId = course.courseId; // SAVE THIS — not recoverable later
+```
 
 ### Step 5: Enroll
 
-```
-POST /courses/{courseId}/enroll  (Authorization: Bearer <token>)
-{ deadline: "2026-09-01" }
-→  { message: "Enrolled successfully" }
+```typescript
+await apiRequest<EnrollResponse>(
+  `/courses/${courseId}/enroll`,
+  { method: "POST", body: JSON.stringify({ deadline: "2026-09-01" }) },
+  token
+);
 ```
 
-### Step 6: Mark Lectures Complete (as user watches)
+### Step 6: Mark Lectures Complete
 
-```
-POST /courses/{courseId}/lectures/{lectureId}/complete  (Authorization: Bearer <token>)
-→  { message: "Lecture marked as completed" }
+```typescript
+// When user finishes the lecture at index i (0-based):
+const lectureId = `lecture_${courseId}_${i}`;
+
+await apiRequest<CompleteLectureResponse>(
+  `/courses/${courseId}/lectures/${lectureId}/complete`,
+  { method: "POST" },
+  token
+);
 ```
 
 ### Step 7: Check Progress
 
-```
-GET /courses/{courseId}/progress  (Authorization: Bearer <token>)
-→  { percentage: 33, totalLectures: 3, completedLectures: 1, deadline: "..." }
+```typescript
+const progress = await apiRequest<CourseProgress>(
+  `/courses/${courseId}/progress`,
+  {},
+  token
+);
+console.log(`${progress.percentage}% complete`);
 ```
 
 ### Step 8: Dashboard — List All Courses
 
-```
-GET /courses  (Authorization: Bearer <token>)
-→  [ { courseId, courseTitle, percentage, deadline, ... } ]
+```typescript
+const courses = await apiRequest<ListCoursesResponse>("/courses", {}, token);
+// courses is an array, possibly empty []
 ```
 
 ---
 
 ## 8. Neo4j Graph Schema
 
-The data is stored as a graph in Neo4j AuraDB. This is not RESTful — it's a graph database.
+The data is stored as a graph in Neo4j AuraDB — not a relational database.
 
 ### Node Labels
 
 | Label | Properties | Description |
 |-------|-----------|-------------|
-| `User` | `{ id: string }` | Identified by Firebase Auth UID |
-| `Course` | `{ id: string, title: string, metadata: string }` | A course created from YouTube timestamps |
-| `Lecture` | `{ id: string, title: string, duration: number }` | A chapter/timestamp within a course |
+| `User` | `{ id: string }` | Firebase Auth UID |
+| `Course` | `{ id: string, title: string, metadata: string }` | Course from YouTube timestamps |
+| `Lecture` | `{ id: string, title: string, duration: number }` | Chapter/timestamp within a course |
 
 ### Relationship Types
 
-| Type | From | To | Properties |
-|------|------|----|------------|
-| `[:CONTAINS]` | `Course` | `Lecture` | — |
-| `[:ENROLLED_IN]` | `User` | `Course` | `{ deadline: string }` |
-| `[:COMPLETED]` | `User` | `Lecture` | — |
+| Type | From → To | Properties |
+|------|-----------|------------|
+| `[:CONTAINS]` | `Course → Lecture` | — |
+| `[:ENROLLED_IN]` | `User → Course` | `{ deadline: string }` |
+| `[:COMPLETED]` | `User → Lecture` | — |
 
 ### Visual Representation
 
@@ -635,24 +823,23 @@ The data is stored as a graph in Neo4j AuraDB. This is not RESTful — it's a gr
   │                                              [CONTAINS]
   │                                                    │
   │                                                    ├──▶(Lecture {id: "lecture_..._0", title: "Intro"})
-  │                                                    │
   │                                                    ├──▶(Lecture {id: "lecture_..._1", title: "Main"})
-  │                                                    │
-  └──[COMPLETED]──▶(Lecture {id: "lecture_..._0"})     │
-                                                       └──▶(Lecture {id: "lecture_..._2", title: "Outro"})
+  │                                                    └──▶(Lecture {id: "lecture_..._2", title: "Outro"})
+  │
+  └──[COMPLETED]──▶(Lecture {id: "lecture_..._0"})
 ```
 
 ### Key Rules
 
-1. **No redundant course nodes** — Uses `MERGE` to avoid duplicating courses by ID
-2. **Logical isolation** — All queries scope to a specific User node; never cross-user
-3. **Progress calculated by counting relationships** — `percentage = COUNT(COMPLETED) / COUNT(CONTAINS) * 100`, not from JSON blobs
-4. **Deadline on the edge** — The deadline is a property of `ENROLLED_IN`, not on User or Course nodes, so different users can have different deadlines for the same course
+1. **No duplicate nodes** — Uses `MERGE` by ID; calling `POST /courses` twice with same payload is safe.
+2. **User isolation** — All queries scope to a specific `User` node; never return cross-user data.
+3. **Progress by counting relationships** — `percentage = COUNT(COMPLETED) / COUNT(CONTAINS) * 100`.
+4. **Deadline on the edge** — `ENROLLED_IN.deadline` allows different users different deadlines for the same course.
 
 ### Cypher Queries (Reference for Debugging)
 
 ```cypher
--- View all your graph data
+-- View all graph data
 MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 50
 
 -- View a specific user's enrolled courses with progress
@@ -664,3 +851,208 @@ RETURN c.title, COUNT(l) AS total, COUNT(comp) AS done, e.deadline
 -- View all users and their enrollments
 MATCH (u:User)-[e:ENROLLED_IN]->(c:Course) RETURN u.id, c.title, e.deadline
 ```
+
+---
+
+## 9. Complete TypeScript SDK
+
+> **AI note:** Copy-paste this module as your starting point. It wraps every endpoint with full types.
+
+```typescript
+// api.ts — Modulo Learn API SDK
+
+const BASE_URL = import.meta.env?.VITE_API_URL
+  ?? "https://us-central1-modulo-learn-75e14.cloudfunctions.net/api";
+
+// ── Types ─────────────────────────────────────────────────────────────────
+
+export interface SignupRequest  { name: string; email: string; password: string; }
+export interface SignupResponse { message: string; user: { name: string; email: string; uid: string; }; }
+
+export interface LoginRequest   { email: string; password: string; }
+export interface LoginResponse  { message: string; uid: string; email: string; name: string; token: string; }
+
+export interface MeResponse     { uid: string; email: string; name: string; }
+
+export interface Timestamp      { start_seconds: number; title: string; }
+
+export interface VideoAskResponse  { type: "video"; title: string; url: string; thumbnail: string; timestamps: Timestamp[]; }
+export interface PlaylistVideo     { title: string; url: string; thumbnail: string; timestamps: Timestamp[]; }
+export interface PlaylistAskResponse { type: "playlist"; title: string; url: string; videos: PlaylistVideo[]; }
+export type AskResponse = VideoAskResponse | PlaylistAskResponse;
+
+export interface LectureInput         { title: string; duration?: number; }
+export interface CreateCourseRequest  { title: string; metadata?: string; lectures: LectureInput[]; }
+export interface CreateCourseResponse { message: string; courseId: string; title: string; lectures: number; }
+
+export interface EnrollRequest  { deadline: string; }
+export interface EnrollResponse { message: string; courseId: string; deadline: string; }
+
+export interface CourseProgress {
+  courseTitle: string; totalLectures: number; completedLectures: number;
+  percentage: number; deadline: string | null;
+}
+export type ListCoursesResponse = Array<{
+  courseId: string; courseTitle: string; totalLectures: number;
+  completedLectures: number; percentage: number; deadline: string | null;
+}>;
+
+// ── Core fetch helper ─────────────────────────────────────────────────────
+
+async function request<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...init.headers,
+    },
+  });
+  const ct   = res.headers.get("content-type") ?? "";
+  const body = ct.includes("application/json") ? await res.json() : await res.text();
+  if (!res.ok) throw new Error((body as any)?.error ?? `HTTP ${res.status}`);
+  return body as T;
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────
+
+export const auth = {
+  signup: (data: SignupRequest) =>
+    request<SignupResponse>("/auth/signup", { method: "POST", body: JSON.stringify(data) }),
+
+  login: (data: LoginRequest) =>
+    request<LoginResponse>("/auth/login",  { method: "POST", body: JSON.stringify(data) }),
+
+  me: (token: string) =>
+    request<MeResponse>("/auth/me", {}, token),
+};
+
+// ── Ask ───────────────────────────────────────────────────────────────────
+
+export const ask = {
+  // No token required — /ask is a public endpoint
+  fromUrl: (url: string) =>
+    request<AskResponse>("/ask", { method: "POST", body: JSON.stringify({ url }) }),
+};
+
+// ── Courses ───────────────────────────────────────────────────────────────
+
+export const courses = {
+  create: (data: CreateCourseRequest, token: string) =>
+    request<CreateCourseResponse>("/courses", { method: "POST", body: JSON.stringify(data) }, token),
+
+  enroll: (courseId: string, deadline: string, token: string) =>
+    request<EnrollResponse>(
+      `/courses/${courseId}/enroll`,
+      { method: "POST", body: JSON.stringify({ deadline }) },
+      token
+    ),
+
+  /** lectureIndex is the 0-based position of the lecture in the lectures[] array */
+  completeLecture: (courseId: string, lectureIndex: number, token: string) => {
+    const lectureId = `lecture_${courseId}_${lectureIndex}`;
+    return request<{ message: string }>(
+      `/courses/${courseId}/lectures/${lectureId}/complete`,
+      { method: "POST" },
+      token
+    );
+  },
+
+  progress: (courseId: string, token: string) =>
+    request<CourseProgress>(`/courses/${courseId}/progress`, {}, token),
+
+  list: (token: string) =>
+    request<ListCoursesResponse>("/courses", {}, token),
+};
+
+// ── Utilities ─────────────────────────────────────────────────────────────
+
+/** Construct a lectureId from courseId and 0-based lecture index */
+export function getLectureId(courseId: string, index: number): string {
+  return `lecture_${courseId}_${index}`;
+}
+
+/** Map /ask timestamps to /courses lectures input */
+export function timestampsToLectures(timestamps: Timestamp[]): LectureInput[] {
+  return timestamps.map((t) => ({ title: t.title, duration: t.start_seconds }));
+}
+```
+
+---
+
+## 10. Common Mistakes & Gotchas
+
+> **AI note:** These are the most frequent integration errors when generating client code.
+
+### ❌ Mistake 1: Sending Authorization header to `/ask`
+
+`POST /ask` is **public** — no token is needed. It works without one, but do not assume it requires auth.
+
+```typescript
+// ✅ Correct
+await request("/ask", { method: "POST", body: JSON.stringify({ url }) });
+
+// ❌ Wrong
+await request("/ask", { method: "POST", body: JSON.stringify({ url }) }, token);
+```
+
+### ❌ Mistake 2: Using `start_seconds` as the lecture index
+
+`start_seconds` is the **video seek position** (seconds), NOT the array index for constructing `lectureId`.
+
+```typescript
+// ✅ Correct — use the 0-based array index from the original lectures[] array
+const lectureId = `lecture_${courseId}_${index}`;   // index = 0, 1, 2, ...
+
+// ❌ Wrong — start_seconds is the video timestamp, not the index
+const lectureId = `lecture_${courseId}_${timestamp.start_seconds}`;
+```
+
+### ❌ Mistake 3: Not saving `courseId` after course creation
+
+`courseId` is returned once in `POST /courses`. There is no "get course by title" endpoint to recover it.
+
+```typescript
+// ✅ Persist courseId immediately after creation
+const { courseId } = await courses.create(data, token);
+// Store in state, localStorage, or your database
+```
+
+### ❌ Mistake 4: Expecting `name` from Firebase Auth
+
+`name` in `GET /auth/me` and `POST /auth/login` comes from **Firestore `users/{uid}.name`**, not
+Firebase Auth's `displayName`. Users created outside of `POST /auth/signup` will have `name: ""`.
+
+### ❌ Mistake 5: Calling `.json()` on `GET /test`
+
+`GET /test` returns `text/plain`. Use `.text()` or the `apiRequest` wrapper (which checks `content-type`).
+
+### ❌ Mistake 6: Assuming the token auto-refreshes
+
+Firebase ID Tokens expire after **1 hour**. There is no `/auth/refresh` endpoint. After expiry,
+any protected endpoint returns `401`. Redirect to login.
+
+```typescript
+// ✅ Handle token expiry
+try {
+  const me = await auth.me(token);
+} catch {
+  clearAuth();
+  redirectToLogin();
+}
+```
+
+### ❌ Mistake 7: Treating `GET /courses` as a 404 when empty
+
+When the user has no enrollments, `GET /courses` returns `200` with `[]` — **not a 404**.
+
+```typescript
+// ✅ Correct
+const list = await courses.list(token); // may be []
+if (list.length === 0) renderEmptyState();
+```
+
+### ❌ Mistake 8: Forgetting `Content-Type: application/json` on POST requests
+
+POST requests without this header will fail to parse the JSON body. The `apiRequest` wrapper and SDK
+set it automatically — only a risk if making raw `fetch` calls manually.
