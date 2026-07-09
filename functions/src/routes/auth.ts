@@ -103,14 +103,23 @@ router.get("/auth/me", async (req: Request, res: Response) => {
     const token = authHeader.split("Bearer ")[1];
     const decoded = await admin.auth().verifyIdToken(token);
 
-    const userDoc = await admin.firestore().collection("users").doc(decoded.uid).get();
-    const userData = userDoc.data();
+    const uid = req.query.uid as string;
+    if (!uid) {
+      res.status(400).json({ error: "uid query parameter is required" });
+      return;
+    }
+
+    if (decoded.uid !== uid) {
+      res.status(403).json({ error: "You can only access your own details" });
+      return;
+    }
+
+    const userDoc = await admin.firestore().collection("users").doc(uid).get();
+    const userData = userDoc.data() || {};
 
     res.status(200).json({
-      uid: decoded.uid,
-      email: decoded.email || "",
-      name: userData?.name || "",
-      // Progress 
+      ...userData,
+      token,
     });
   } catch (error: any) {
     res.status(401).json({ error: "Invalid or expired token" });

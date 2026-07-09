@@ -9,13 +9,13 @@ if (!config.apiKey) {
 
 const genAI = new GoogleGenerativeAI(config.apiKey || "dummy-key");
 
-export async function generateTimestamps(params: {
+function buildPrompt(params: {
   title: string;
   description: string;
   duration: number;
   url: string;
   transcript?: string;
-}): Promise<{ start_seconds: number; title: string }[]> {
+}): string {
   const { title, description, duration, url, transcript } = params;
 
   let prompt =
@@ -38,22 +38,45 @@ Duration: ${duration} seconds`;
 - Cover the full duration logically
 - Return ONLY the raw JSON array, no markdown, no code fences, no extra text`;
 
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-  const result = await model.generateContent(prompt);
-  const text = result.response.text();
+  return prompt;
+}
 
+function parseTimestamps(text: string): { start_seconds: number; title: string }[] {
   const cleanJson = text
     .replace(/```json\s*/gi, "")
     .replace(/```\s*$/g, "")
     .trim();
 
-  try {
-    const timestamps = JSON.parse(cleanJson) as { start_seconds: number; title: string }[];
-    if (!Array.isArray(timestamps) || timestamps.length === 0) {
-      throw new Error("Gemini returned empty or invalid array");
-    }
-    return timestamps;
-  } catch (err) {
-    throw new Error(`Failed to parse Gemini response: ${(err as Error).message}`);
+  const timestamps = JSON.parse(cleanJson) as { start_seconds: number; title: string }[];
+  if (!Array.isArray(timestamps) || timestamps.length === 0) {
+    throw new Error("Gemini returned empty or invalid array");
   }
+  return timestamps;
+}
+
+export async function generateTimestamps(params: {
+  title: string;
+  description: string;
+  duration: number;
+  url: string;
+  transcript?: string;
+}): Promise<{ start_seconds: number; title: string }[]> {
+  const prompt = buildPrompt(params);
+  const errors: string[] = [];
+
+  for (const modelName of config.models) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      return parseTimestamps(result.response.text());
+    } catch (err) {
+      errors.push(`${modelName}: ${(err as Error).message}`);
+      const isLast = modelName === config.models[config.models.length - 1];
+      if (!isLast) {
+        console.warn(`Gemini ${modelName} failed, trying next model`);
+      }
+    }
+  }
+
+  throw new Error(`All Gemini models failed:\n${errors.join("\n")}`);
 }

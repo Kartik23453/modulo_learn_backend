@@ -37,7 +37,14 @@ interface SignupResponse { message: string; user: { name: string; email: string;
 interface LoginRequest  { email: string; password: string; }
 interface LoginResponse { message: string; uid: string; email: string; name: string; token: string; }
 
-interface MeResponse    { uid: string; email: string; name: string; }
+// MeResponse spreads all Firestore user fields — at minimum { name, email, createdAt } from signup
+// plus the token echoed back.
+interface MeResponse extends Record<string, unknown> {
+  name: string;
+  email: string;
+  createdAt?: string;  // set during POST /auth/signup
+  token: string;        // the same Bearer token that was sent in the Authorization header
+}
 
 // ── Ask ───────────────────────────────────────────────────────────────────
 interface AskRequest  { url: string; }
@@ -191,7 +198,8 @@ curl -X POST "$BASE_URL/auth/login" \
 
 ### 1.3 Get Current User
 
-Verifies the token and returns the user's profile from Firestore. Use this on every app load.
+Verifies the token, checks the requested `uid` matches the token owner, and returns all Firestore
+user fields plus the token itself. Use this on every app load to validate the session.
 
 **Endpoint:** `GET /auth/me`
 **Auth required:** ✅ Yes — `Authorization: Bearer <token>`
@@ -202,30 +210,52 @@ Verifies the token and returns the user's profile from Firestore. Use this on ev
 |--------|-------|----------|
 | `Authorization` | `Bearer <token>` | ✅ |
 
+**Query Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `uid` | `string` | ✅ | The Firebase UID of the user whose profile to fetch |
+
 **curl:**
 ```bash
-curl "$BASE_URL/auth/me" \
+curl "$BASE_URL/auth/me?uid=abc123def456" \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 **Success Response — `200 OK`:** `MeResponse`
+
+Returns all fields from the Firestore `users/{uid}` document **spread** into the response,
+plus the `token` field echoed back.
+
 ```json
-{ "uid": "abc123def456", "email": "john@example.com", "name": "John Doe" }
+{
+  "name": "John Doe",
+  "email": "john@example.com",
+  "createdAt": "2026-07-09T18:00:00.000Z",
+  "token": "eyJhbGciOiJSUzI1NiIs..."
+}
 ```
 
-> **AI note:** `name` comes from Firestore `users/{uid}.name`, not Firebase Auth `displayName`. If a
-> user was created outside of `POST /auth/signup`, their Firestore doc may not exist and `name` will
-> be `""`.
+> **AI note:**
+> - `uid` is **not** returned explicitly — it lives in Firestore but is spread via `...userData`. If
+>   you need the uid client-side, store it from the `POST /auth/login` response.
+> - `name`, `email`, `createdAt` are written by `POST /auth/signup`. Users created outside this
+>   endpoint may have an empty or missing Firestore doc.
+> - `token` is the same JWT that was sent in the `Authorization` header — it is echoed back for
+>   convenience (e.g., to update storage after a session refresh flow).
 
 **Error Responses:**
 
 | Status | Body | Cause |
 |--------|------|-------|
+| `400` | `{ "error": "uid query parameter is required" }` | `?uid=` missing from URL |
 | `401` | `{ "error": "Missing or invalid Authorization header" }` | No/malformed header |
 | `401` | `{ "error": "Invalid or expired token" }` | Expired or bad JWT |
+| `403` | `{ "error": "You can only access your own details" }` | Token uid ≠ query uid |
 
 **Frontend pattern:**
-- Call on app init. If `401` → clear stored token → redirect to `/login`.
+- Always include `?uid=<stored_uid>` in the request URL.
+- Call on app init. If `401` or `403` → clear stored token → redirect to `/login`.
 - ⚠️ **No refresh token endpoint exists.** User must re-login after 1 hour.
 
 ---
@@ -705,12 +735,14 @@ const name  = login.name;
 ### Step 2: Verify Session on App Load
 
 ```typescript
+const storedUid = localStorage.getItem("uid")!; // saved from login
 try {
-  const me = await apiRequest<MeResponse>("/auth/me", {}, token);
+  const me = await apiRequest<MeResponse>(`/auth/me?uid=${storedUid}`, {}, token);
   // Token still valid — continue to dashboard
 } catch {
-  // Token expired or invalid → clear storage and redirect
+  // 401 (expired), 403 (uid mismatch), or 400 (missing uid) → force re-login
   localStorage.removeItem("token");
+  localStorage.removeItem("uid");
   window.location.href = "/login";
 }
 ```
@@ -872,7 +904,13 @@ export interface SignupResponse { message: string; user: { name: string; email: 
 export interface LoginRequest   { email: string; password: string; }
 export interface LoginResponse  { message: string; uid: string; email: string; name: string; token: string; }
 
-export interface MeResponse     { uid: string; email: string; name: string; }
+// MeResponse spreads all Firestore user fields plus echoes the token.
+export interface MeResponse extends Record<string, unknown> {
+  name: string;
+  email: string;
+  createdAt?: string;
+  token: string;
+}
 
 export interface Timestamp      { start_seconds: number; title: string; }
 
@@ -923,8 +961,9 @@ export const auth = {
   login: (data: LoginRequest) =>
     request<LoginResponse>("/auth/login",  { method: "POST", body: JSON.stringify(data) }),
 
-  me: (token: string) =>
-    request<MeResponse>("/auth/me", {}, token),
+  /** uid must match the uid encoded in the token — passing someone else's uid returns 403 */
+  me: (token: string, uid: string) =>
+    request<MeResponse>(`/auth/me?uid=${encodeURIComponent(uid)}`, {}, token),
 };
 
 // ── Ask ───────────────────────────────────────────────────────────────────
@@ -1018,7 +1057,23 @@ const { courseId } = await courses.create(data, token);
 // Store in state, localStorage, or your database
 ```
 
-### ❌ Mistake 4: Expecting `name` from Firebase Auth
+### ❌ Mistake 4: Not passing `?uid=` to `GET /auth/me`
+
+`GET /auth/me` now **requires** a `?uid=` query parameter. Without it the server returns `400`.
+Also, the uid in the query must match the uid in the JWT — passing a different uid returns `403`.
+
+```typescript
+// ✅ Correct
+const uid = localStorage.getItem("uid"); // stored from login
+await apiRequest(`/auth/me?uid=${uid}`, {}, token);
+
+// ❌ Wrong — missing uid param
+await apiRequest("/auth/me", {}, token);
+```
+
+> **Corollary:** `uid` is **not** in the `GET /auth/me` response body — store it from `POST /auth/login`.
+
+### ❌ Mistake 4b: Expecting `name` from Firebase Auth
 
 `name` in `GET /auth/me` and `POST /auth/login` comes from **Firestore `users/{uid}.name`**, not
 Firebase Auth's `displayName`. Users created outside of `POST /auth/signup` will have `name: ""`.
@@ -1033,9 +1088,10 @@ Firebase ID Tokens expire after **1 hour**. There is no `/auth/refresh` endpoint
 any protected endpoint returns `401`. Redirect to login.
 
 ```typescript
-// ✅ Handle token expiry
+// ✅ Handle token expiry (pass stored uid)
 try {
-  const me = await auth.me(token);
+  const uid = localStorage.getItem("uid")!;
+  const me = await auth.me(token, uid);
 } catch {
   clearAuth();
   redirectToLogin();
