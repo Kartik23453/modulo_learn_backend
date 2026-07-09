@@ -110,6 +110,7 @@ router.get("/auth/me", async (req: Request, res: Response) => {
       uid: decoded.uid,
       email: decoded.email || "",
       name: userData?.name || "",
+      // Progress 
     });
   } catch (error: any) {
     res.status(401).json({ error: "Invalid or expired token" });
