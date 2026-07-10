@@ -488,6 +488,15 @@ curl -X POST "$BASE_URL/courses/course_1720286400000/enroll" \
 | `401` | Auth error (see §1) | — |
 | `500` | `{ "error": "<neo4j message>" }` | Database error |
 
+> **💾 Storage Details:** The deadline is stored on the `ENROLLED_IN` Neo4j edge using this Cypher query:
+> ```cypher
+> MERGE (u:User {id: $userId})-[e:ENROLLED_IN]->(c:Course {id: $courseId})
+> SET e.deadline = $deadline
+> ```
+> - **No date validation** — the server only checks the string is non-empty. Any string like `"abc"` is stored as-is.
+> - **Overwrite on re-enroll** — calling this endpoint again with a new deadline overwrites the previous value (due to `MERGE` + `SET`).
+> - **Type in Neo4j** — stored as a plain string, not a date object.
+
 ---
 
 ### 4.3 Mark Lecture Complete
@@ -867,6 +876,7 @@ The data is stored as a graph in Neo4j AuraDB — not a relational database.
 2. **User isolation** — All queries scope to a specific `User` node; never return cross-user data.
 3. **Progress by counting relationships** — `percentage = COUNT(COMPLETED) / COUNT(CONTAINS) * 100`.
 4. **Deadline on the edge** — `ENROLLED_IN.deadline` allows different users different deadlines for the same course.
+5. **Deadline is unvalidated** — stored as a raw string without date format checking. The frontend should validate before sending.
 
 ### Cypher Queries (Reference for Debugging)
 
@@ -1112,3 +1122,17 @@ if (list.length === 0) renderEmptyState();
 
 POST requests without this header will fail to parse the JSON body. The `apiRequest` wrapper and SDK
 set it automatically — only a risk if making raw `fetch` calls manually.
+
+### ❌ Mistake 9: Sending an invalid deadline format
+
+The server accepts **any** non-empty string as `deadline`. No ISO date validation is performed.
+
+```typescript
+// ❌ The server will store this — but it's not a real date
+await courses.enroll(courseId, "not-a-date", token);
+
+// ✅ Correct — send a valid ISO date string
+await courses.enroll(courseId, "2026-09-01", token);
+```
+
+Validate the date on the frontend before sending.
